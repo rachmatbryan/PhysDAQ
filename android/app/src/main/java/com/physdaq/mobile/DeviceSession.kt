@@ -9,6 +9,7 @@ import com.physdaq.mobile.ble.label
 import com.physdaq.mobile.dsp.HeartRateEstimator
 import com.physdaq.mobile.dsp.MadgwickImu
 import com.physdaq.mobile.dsp.Tilt
+import com.physdaq.mobile.nodes.NodeChecks
 import com.physdaq.mobile.dsp.PpgDisplayFilter
 import com.physdaq.mobile.ui.SignalBuffer
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +66,10 @@ class DeviceSession(
     private val _battery = MutableStateFlow<DeviceLine.Battery?>(null)
     val battery: StateFlow<DeviceLine.Battery?> = _battery
 
+    /** True after a link loss that looks like the node fell asleep; cleared when it reconnects. */
+    private val _maybeAsleep = MutableStateFlow(false)
+    val maybeAsleep: StateFlow<Boolean> = _maybeAsleep
+
     private var sampleCounter = 0
     private val jobs = mutableListOf<Job>()
 
@@ -74,7 +79,15 @@ class DeviceSession(
     init {
         jobs += scope.launch { client.lines.collect { handleLine(it) } }
         jobs += scope.launch { client.connectionState.collect { onState(it) } }
-        jobs += scope.launch { client.notice.filterNotNull().collect { say("!! $it") } }
+        jobs += scope.launch {
+            client.notice.filterNotNull().collect {
+                say("!! $it")
+                if (NodeChecks.looksAsleep(it) && !_maybeAsleep.value) {
+                    _maybeAsleep.value = true
+                    say(NodeChecks.SLEEP_HINT)
+                }
+            }
+        }
     }
 
     fun connect() = client.connect(address)
@@ -90,6 +103,7 @@ class DeviceSession(
     private fun onState(state: BleConnectionState) {
         say("Link: ${state.label()}")
         if (state is BleConnectionState.Connected) {
+            _maybeAsleep.value = false
             // A fresh link means a gap in the data; do not carry a stale window across it.
             estimator.reset()
             _heartRate.value = HeartRateState()

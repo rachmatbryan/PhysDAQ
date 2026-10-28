@@ -5,6 +5,22 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -49,6 +65,8 @@ import kotlinx.coroutines.withContext
 import java.io.InputStreamReader
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 
 /** What is known about one file's contents. */
@@ -217,6 +235,9 @@ fun LibraryScreen() {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            }
+            if (open.members.size >= 2) {
+                item(key = "compare") { CompareCard(open.members, states) }
             }
             items(open.members, key = { it.file.uri }) { m ->
                 LaunchedEffect(m.file.uri) { load(m.file) }
@@ -397,4 +418,188 @@ private fun sizeText(bytes: Long): String = when {
     bytes >= 1_048_576 -> String.format(Locale.ROOT, "%.1f MB", bytes / 1_048_576.0)
     bytes >= 1024 -> String.format(Locale.ROOT, "%d KB", bytes / 1024)
     else -> "$bytes B"
+}
+
+/**
+ * Series colours, one per body position so a position keeps its colour in every
+ * session. Validated as a set for the dark surface (lightness band, chroma,
+ * colour-blind separation of neighbours, contrast).
+ */
+private val SeriesColors = listOf(
+    Color(0xFF3987E5), // head        blue
+    Color(0xFFD95926), // chest       orange
+    Color(0xFF199E70), // left wrist  aqua
+    Color(0xFFC98500), // right wrist yellow
+    Color(0xFFD55181), // left finger magenta
+    Color(0xFF008300), // right finger green
+    Color(0xFF9085E9), // left ankle  violet
+    Color(0xFFE66767)  // right ankle red
+)
+
+private fun colorFor(m: SessionGroup.Member, index: Int): Color =
+    SeriesColors[(m.position?.ordinal ?: index) % SeriesColors.size]
+
+/** Every node's heart rate on one chart, with how closely they agree. Tap or drag to read values. */
+@Composable
+private fun CompareCard(members: List<SessionGroup.Member>, states: Map<String, FileState>) {
+    val done = members.mapIndexedNotNull { i, m ->
+        (states[m.file.uri] as? FileState.Done)?.let { Triple(m, it.analysis, colorFor(m, i)) }
+    }
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Label("Compare nodes: heart rate (BPM)")
+            if (done.size < 2) {
+                Text("Reading files...", style = MaterialTheme.typography.bodySmall, color = PhysDaqColors.Mauve)
+                return@Column
+            }
+            val aligned = remember(done) { SessionComparison.align(done.map { it.second.startSec to it.second.bpmTrace }) }
+            val agreement = remember(aligned) { SessionComparison.agreement(aligned.series) }
+            if (agreement.secondsCompared == 0) {
+                Text(
+                    "No moment where two or more nodes had a heart-rate reading at the same time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return@Column
+            }
+            val points = remember(aligned) { aligned.series.map { ChartData.downsample(it, 400) } }
+            val secPerPoint = aligned.length.toDouble() / points[0].size
+            var cursor by remember(aligned) { mutableStateOf<Int?>(null) }
+
+            Text(
+                String.format(
+                    Locale.ROOT,
+                    "Nodes differ by %.1f BPM typically (median), %.0f BPM at most, over %s with 2+ readings.",
+                    agreement.medianSpread, agreement.maxSpread,
+                    ChartData.formatDuration(agreement.secondsCompared.toDouble())
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            MultiLineChart(points, done.map { it.third }, cursor) { cursor = it }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                val mono = MaterialTheme.typography.labelSmall.copy(fontFamily = Mono)
+                Text(ChartData.formatDuration(aligned.startSec.toDouble()), style = mono, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    cursor?.let { "at " + ChartData.formatDuration(aligned.startSec + it * secPerPoint) } ?: "tap or drag to read values",
+                    style = mono, color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(ChartData.formatDuration((aligned.startSec + aligned.length).toDouble()), style = mono, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+
+            // Legend; with a cursor it shows the values at that moment, otherwise each node's mean.
+            done.forEachIndexed { k, (m, _, color) ->
+                val at = cursor?.let { points[k][it] }
+                val value = when {
+                    cursor == null -> agreement.means[k]?.let { String.format(Locale.ROOT, "mean %.0f", it) } ?: "no reading"
+                    at == null || at.isNaN() -> "--"
+                    else -> String.format(Locale.ROOT, "%.0f", at)
+                }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(width = 14.dp, height = 3.dp).clip(RoundedCornerShape(2.dp)).background(color))
+                    Text(m.label, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    Text(value, style = MaterialTheme.typography.bodySmall.copy(fontFamily = Mono))
+                }
+            }
+        }
+    }
+}
+
+/** Several series sharing one y axis; NaN breaks a line. [onCursor] gets the point index under a tap or drag. */
+@OptIn(ExperimentalTextApi::class)   // text measuring is stable in newer Compose; harmless there
+@Composable
+private fun MultiLineChart(
+    series: List<FloatArray>,
+    colors: List<Color>,
+    cursor: Int?,
+    onCursor: (Int?) -> Unit
+) {
+    var lo = Float.MAX_VALUE
+    var hi = -Float.MAX_VALUE
+    for (s in series) for (v in s) {
+        if (v.isNaN()) continue
+        if (v < lo) lo = v
+        if (v > hi) hi = v
+    }
+    // Round the axis out to whole 5 BPM so gridlines land on readable numbers.
+    val yMin = (floor((lo - 2f) / 5f) * 5f)
+    val yMax = (ceil((hi + 2f) / 5f) * 5f).coerceAtLeast(yMin + 10f)
+    val step = if (yMax - yMin <= 30f) 5f else 10f
+
+    val measurer = rememberTextMeasurer()
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val cursorColor = PhysDaqColors.Overlay
+    val ringColor = MaterialTheme.colorScheme.surface
+    val n = series.firstOrNull()?.size ?: 0
+
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .pointerInput(n) {
+                val gutter = 30.dp.toPx()
+                fun index(x: Float): Int =
+                    (((x - gutter) / (size.width - gutter)) * (n - 1)).toInt().coerceIn(0, n - 1)
+                detectTapGestures { o -> onCursor(index(o.x)) }
+            }
+            .pointerInput(n) {
+                val gutter = 30.dp.toPx()
+                fun index(x: Float): Int =
+                    (((x - gutter) / (size.width - gutter)) * (n - 1)).toInt().coerceIn(0, n - 1)
+                detectHorizontalDragGestures(onDragStart = { o -> onCursor(index(o.x)) }) { change, _ ->
+                    onCursor(index(change.position.x))
+                }
+            }
+    ) {
+        if (n < 2) return@Canvas
+        val gutter = 30.dp.toPx()
+        val w = size.width - gutter
+        val h = size.height
+        fun x(i: Int) = gutter + w * i / (n - 1)
+        fun y(v: Float) = h * (1f - (v - yMin) / (yMax - yMin))
+
+        // Recessive grid with labels on the left.
+        var g = yMin
+        while (g <= yMax + 0.01f) {
+            val gy = y(g)
+            drawLine(gridColor, Offset(gutter, gy), Offset(size.width, gy), 1f)
+            val t = measurer.measure(g.toInt().toString(), TextStyle(fontSize = 10.sp, color = labelColor))
+            drawText(t, topLeft = Offset(0f, (gy - t.size.height / 2f).coerceIn(0f, h - t.size.height)))
+            g += step
+        }
+
+        val stroke = 2.dp.toPx()
+        series.forEachIndexed { k, s ->
+            val path = Path()
+            var down = false
+            for (i in 0 until n) {
+                val v = s[i]
+                if (v.isNaN()) { down = false; continue }
+                if (down) path.lineTo(x(i), y(v)) else { path.moveTo(x(i), y(v)); down = true }
+            }
+            drawPath(path, colors[k], style = Stroke(width = stroke, cap = StrokeCap.Round))
+        }
+
+        cursor?.let { c ->
+            val cx = x(c)
+            drawLine(cursorColor, Offset(cx, 0f), Offset(cx, h), 1.5f)
+            series.forEachIndexed { k, s ->
+                val v = s[c]
+                if (!v.isNaN()) {
+                    drawCircle(ringColor, 6.dp.toPx(), Offset(cx, y(v)))
+                    drawCircle(colors[k], 4.dp.toPx(), Offset(cx, y(v)))
+                }
+            }
+        }
+    }
 }

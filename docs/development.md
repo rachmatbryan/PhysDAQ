@@ -21,6 +21,10 @@ app/                Electron desktop application
   src/renderer/     React UI
   resources/        firmware UF2s bundled into the installer
   scripts/          build-sidecar.mjs (npm → Python shim)
+android/            native Android app (Kotlin, Jetpack Compose) — BLE, recording, library
+  app/src/main/     the app: ble/, dsp/, storage/, nodes/, library/, ui/
+  app/src/test/     JVM unit tests (+ a real recording excerpt in resources/)
+  tools/            Python helpers: node_watch, check_recording, sync_check, ...
 scripts/            bridge.py, build/flash helpers, live plotter, env setup
 analysis/           CSV logger, offline pipeline, interactive explorer
 assets/             logo SVGs, product renders, enclosure CAD (models/*.step)
@@ -44,11 +48,17 @@ flowchart LR
   R1 & R2 --> RES["app/resources/firmware/"]
   RES --> APP
   B3 --> APP
+  AND["android/"] -- "gradlew assembleDebug" --> APK["android/app/build/…/app-debug.apk"]
 ```
 
 Not in git (all generated): `.west/`, `zephyr/`, `modules/`, `bootloader/`,
 `tools/`, `build/`, `build-hub/`, `.venv/`, `app/node_modules/`, `app/out/`,
-`app/dist/`, `app/sidecar/`, `app/resources/firmware/*.uf2`, `logs/*.csv`.
+`app/dist/`, `app/sidecar/`, `app/resources/firmware/*.uf2`, `logs/*.csv`,
+`android/.gradle/`, `android/build/`, `android/app/build/`, `android/.idea/`,
+`android/local.properties`.
+
+> The root `tools/` folder is ignored (it holds the Zephyr toolchain). Python
+> helpers for the Android app live in `android/tools/`, which is tracked.
 
 ---
 
@@ -188,6 +198,35 @@ npm run format
 
 `npm run dev` uses the repo `.venv` for the bridge, so firmware changes and app
 changes can be iterated together without repackaging anything.
+
+### Android app
+
+Install [Android Studio](https://developer.android.com/studio) and open the
+**`android/`** folder (not the repo root). It brings its own JDK and Gradle; nothing
+from the Zephyr toolchain or the Python venv is needed.
+
+```bash
+cd android
+./gradlew test             # JVM unit tests, no phone needed   (PowerShell: .\gradlew test)
+./gradlew assembleDebug    # debug APK
+```
+
+Run on a phone with **Run ▶** (USB debugging on). Android 10 (API 29) or newer.
+Architecture, file formats and rules: [android-app.md](android-app.md).
+
+- **Gradle builds but the editor is full of red.** Hundreds of "Unresolved
+  reference" errors (`ComponentActivity`, `setContent`, ...) while
+  `gradlew assembleDebug` succeeds means the editor's index is stale, not the code:
+  *File → Sync Project with Gradle Files*, then *File → Invalidate Caches →
+  Invalidate and Restart*.
+- **Keep the project out of OneDrive** (or pause syncing while you work). OneDrive
+  locks and half-syncs `.gradle/` and `build/` while Gradle writes to them, which is
+  the usual cause of the problem above. `C:\dev\PhysDAQ` is a good place.
+- **Source files go in `app/src/main/java/com/physdaq/mobile/`, tests in
+  `app/src/test/java/com/physdaq/mobile/`.** A test file accidentally placed under
+  `main/` (or a second copy of a class) shows up as "Redeclaration" errors.
+- The UI (Compose), the BLE client and MediaStore are not unit-tested; check them
+  on a phone.
 
 ### Data tooling
 
@@ -374,7 +413,8 @@ inside a Linux package.
 - **Firmware comments** explain *why*, not *what* — several non-obvious choices
   (FIFO rollover, watchdog sleep options, the reverted heartbeat-validated
   contact check) are documented in-source and should stay that way.
-- **No test suite exists** in any layer. See [roadmap.md](roadmap.md).
+- **Only the Android app has tests** (`cd android && ./gradlew test`). Firmware,
+  bridge, desktop app and analysis have none. See [roadmap.md](roadmap.md).
 
 ---
 
@@ -394,3 +434,6 @@ inside a Linux package.
 | Sidecar exits with `ModuleNotFoundError` | PyInstaller missed a dynamic import | Add it to `hiddenimports` in `scripts/bridge.spec`, rebuild with `make sidecar CLEAN=1` |
 | Antivirus / SmartScreen flags the installer | Unsigned PyInstaller binary | Expected; code-sign via `win.certificateFile` if distributing widely |
 | Serial port vanished | Node entered deep sleep | Move it to wake it, then reconnect — the USB CDC port is recreated |
+| Android: hundreds of red errors, but `gradlew assembleDebug` succeeds | Stale editor index | Sync Project with Gradle Files; Invalidate Caches and Restart |
+| Android: "Redeclaration" errors | A class exists twice, often a file copied into `main/` instead of `test/` | Delete the stray copy |
+| `make` not recognised (Windows PowerShell) | No make on that machine | Use the desktop app's **Flash node firmware**, or drag `physdaq.uf2` onto the XIAO-SENSE drive |

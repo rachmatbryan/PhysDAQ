@@ -150,7 +150,7 @@ object CsvAnalyzer {
             bpmMax = if (count > 0) hi else null,
             skippedRows = skipped
         )
-        return RecordingAnalysis(summary, filtered, trace, rollTrace, pitchTrace)
+        return RecordingAnalysis(summary, filtered, trace, rollTrace, pitchTrace, startSec = t0)
     }
 
     /** Growable primitive array, so a 45,000-row file does not box 45,000 Doubles. */
@@ -194,7 +194,9 @@ class RecordingAnalysis(
     val bpmTrace: FloatArray,
     /** Tilt once per second, in degrees; null if the file has no motion columns. Yaw is left out: it drifts. */
     val rollTrace: FloatArray? = null,
-    val pitchTrace: FloatArray? = null
+    val pitchTrace: FloatArray? = null,
+    /** Time of the first sample, in session seconds: slot 0 of the traces is this second. */
+    val startSec: Double = 0.0
 ) {
     /** About [lenSec] seconds of the filtered signal starting [startSec] in (clamped to the recording). */
     fun filteredWindow(startSec: Double, lenSec: Double): FloatArray {

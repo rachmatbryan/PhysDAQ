@@ -67,12 +67,18 @@ import com.physdaq.mobile.ble.StreamStats
 import com.physdaq.mobile.ble.label
 import com.physdaq.mobile.storage.FileStatus
 import com.physdaq.mobile.storage.RecordTarget
+import com.physdaq.mobile.ui.BodyDot
+import com.physdaq.mobile.ui.BodyMapView
 import com.physdaq.mobile.ui.LiveChart
 import com.physdaq.mobile.ui.TiltIndicator
 import com.physdaq.mobile.ui.theme.Mono
 import com.physdaq.mobile.ui.theme.PhysDaqColors
 import com.physdaq.mobile.ui.theme.PhysDaqTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.key
+import androidx.compose.runtime.rememberCoroutineScope
 import java.util.Locale
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.material3.AlertDialog
@@ -268,10 +274,27 @@ class MainActivity : ComponentActivity() {
             LinkDialog(target, onPick = { d -> linkTo(d, target); linkTarget = null }, onDismiss = { linkTarget = null })
         }
 
+        val listState = rememberLazyListState()
+        val scope = rememberCoroutineScope()
+
+        // Status colour per occupied position, for the body map (same colours as the rows).
+        val dotFills = HashMap<NodePosition, Color>()
+        sessions.forEach { s ->
+            key(s.address) {
+                val conn by s.client.connectionState.collectAsStateWithLifecycle()
+                val hr by s.heartRate.collectAsStateWithLifecycle()
+                assignments[s.address]?.let { dotFills[it] = statusColor(conn, hr.contact) }
+            }
+        }
+        val dots = NodePosition.values().associateWith { pos ->
+            BodyDot(fill = dotFills[pos], selected = detailSlug == pos.slug)
+        }
+
         LazyColumn(
             Modifier
                 .fillMaxSize()
                 .padding(horizontal = 16.dp),
+            state = listState,
             contentPadding = PaddingValues(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -349,6 +372,28 @@ class MainActivity : ComponentActivity() {
                             onClick = { disconnectAll() }
                         ) { Text("Disconnect all") }
                     }
+                    BodyMapView(
+                        dots = dots,
+                        bodyColor = PhysDaqColors.Overlay.copy(alpha = 0.45f),
+                        emptyColor = PhysDaqColors.Overlay,
+                        selectedColor = PhysDaqColors.Pink,
+                        onTap = { pos ->
+                            if (dotFills.containsKey(pos)) {
+                                detailSlug = pos.slug
+                                // Rows start after the recording card and this card.
+                                scope.launch { listState.animateScrollToItem(2 + pos.ordinal) }
+                            } else {
+                                linkTarget = pos
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.CenterHorizontally)
+                    )
+                    Text(
+                        "Front view: the person's left is on your right. Tap a dot to link or open it.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    MapLegend()
                     if (sessions.isEmpty()) {
                         Text(
                             "Tap Link on a body position, then pick the device worn there.",
@@ -700,6 +745,23 @@ class MainActivity : ComponentActivity() {
             String.format(Locale.ROOT, "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
         } else {
             String.format(Locale.ROOT, "%02d:%02d", s / 60, s % 60)
+        }
+    }
+
+    @Composable
+    private fun MapLegend() {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            listOf(
+                PhysDaqColors.Green to "Worn",
+                PhysDaqColors.Amber to "Not worn",
+                PhysDaqColors.Mauve to "Connecting",
+                PhysDaqColors.Overlay to "Off / empty"
+            ).forEach { (c, label) ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(c))
+                    Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         }
     }
 
